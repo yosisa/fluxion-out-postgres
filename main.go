@@ -78,28 +78,31 @@ func (p *OutPostgres) Encode(ev *message.Event) (buffer.Sizer, error) {
 	return &d, nil
 }
 
-func (p *OutPostgres) Write(l []buffer.Sizer) (n int, err error) {
-	var tx *sql.Tx
-	if tx, err = p.db.Begin(); err != nil {
+func (p *OutPostgres) Write(l []buffer.Sizer) (int, error) {
+	tx, err := p.db.Begin()
+	if err != nil {
 		p.env.Log.Error(err)
-		return
+		return 0, err
 	}
-	defer func() {
-		if txerr := tx.Commit(); txerr != nil {
-			err = txerr
-			n = 0
-		}
-		if err != nil {
-			p.env.Log.Error(err)
-		}
-	}()
 	for i, item := range l {
 		d := item.(*data)
 		n := len(d.values)
 		stmt := fmt.Sprintf(`INSERT INTO %s(%s) VALUES(%s)`, p.conf.Table, d.columns, p.spool[n])
 		if _, err = tx.Exec(stmt, d.values...); err != nil {
-			return i + 1, err
+			p.env.Log.Error(err)
+			if err = tx.Rollback(); err != nil {
+				p.env.Log.Error(err)
+				return 0, err
+			}
+			if i > 0 {
+				return p.Write(l[:i])
+			}
+			return 1, nil // Remove the failed item due to continuous error
 		}
+	}
+	if err = tx.Commit(); err != nil {
+		p.env.Log.Error(err)
+		return 0, err
 	}
 	return len(l), nil
 }
