@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sync"
 
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 	"github.com/yosisa/fluxion/buffer"
 	"github.com/yosisa/fluxion/message"
 	"github.com/yosisa/fluxion/plugin"
@@ -90,14 +90,18 @@ func (p *OutPostgres) Write(l []buffer.Sizer) (int, error) {
 		stmt := fmt.Sprintf(`INSERT INTO %s(%s) VALUES(%s)`, p.conf.Table, d.columns, p.spool[n])
 		if _, err = tx.Exec(stmt, d.values...); err != nil {
 			p.env.Log.Error(err)
-			if err = tx.Rollback(); err != nil {
-				p.env.Log.Error(err)
+			if rerr := tx.Rollback(); rerr != nil {
+				p.env.Log.Error(rerr)
 				return 0, err
 			}
-			if i > 0 {
+			if pe, ok := err.(*pq.Error); ok && pe.Code.Class() == "42" { // syntax error
+				if i == 0 { // Drop because it will never succeed
+					return 1, nil
+				}
+				// Write the valid records
 				return p.Write(l[:i])
 			}
-			return 1, nil // Remove the failed item due to continuous error
+			return 0, err
 		}
 	}
 	if err = tx.Commit(); err != nil {
